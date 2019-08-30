@@ -5234,7 +5234,8 @@ Bitcoin.Address = function (bytes) {
 	this.version = Bitcoin.Address.networkVersion;
 };
 
-Bitcoin.Address.networkVersion = 0x5d; // mainnet
+Bitcoin.Address.networkVersion = 93; // mainnet, script_address2 = 33, legacy = 93
+Bitcoin.Address.addressFormat = 0;   // 0 - legacy, 1 - segwit
 
 /**
 * Serialize this object as a standard Bitcoin address.
@@ -5242,14 +5243,7 @@ Bitcoin.Address.networkVersion = 0x5d; // mainnet
 * Returns the address as a base58-encoded string in the standardized format.
 */
 Bitcoin.Address.prototype.toString = function () {
-	// Get a copy of the hash
-	var hash = this.hash.slice(0);
-
-	// Version
-	hash.unshift(this.version);
-	var checksum = Crypto.SHA256(Crypto.SHA256(hash, { asBytes: true }), { asBytes: true });
-	var bytes = hash.concat(checksum.slice(0, 4));
-	return Bitcoin.Base58.encode(bytes);
+	return this;
 };
 
 Bitcoin.Address.prototype.getHashBase64 = function () {
@@ -5779,9 +5773,25 @@ Bitcoin.ECKey = (function () {
 	};
 
 	ECKey.prototype.getBitcoinAddress = function () {
-		var hash = this.getPubKeyHash();
-		var addr = new Bitcoin.Address(hash);
-		return addr.toString();
+		var hash = this.getPubKeyHash().slice(0);
+		var addr = "";
+		if (Bitcoin.Address.addressFormat == 1) {	// segwit address format (starts with "E")
+			hash.unshift(0x14);
+		        hash.unshift(0x00);
+			hash = Bitcoin.Util.sha256ripe160(hash);
+		}
+		if (Bitcoin.Address.addressFormat == 2) {
+			if (this.compressed)
+				addr = encode("eac", base32(hash));
+			else
+				addr = "";      
+			return addr;
+		}
+		hash.unshift(Bitcoin.Address.networkVersion);
+		var checksum = Crypto.SHA256(Crypto.SHA256(hash, { asBytes: true }), { asBytes: true });
+		var bytes = hash.concat(checksum.slice(0, 4));
+		addr = Bitcoin.Base58.encode(bytes);
+		return addr;
 	};
 
 	/*
@@ -6354,6 +6364,181 @@ Bitcoin.Util = {
 	}; // window.Crypto_scrypt
 })();
 	</script>
+
+
+	<script type="text/javascript">
+// Copyright (c) 2017 Pieter Wuille
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+var CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+var GENERATOR = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+function polymod (values) {
+  var chk = 1;
+  for (var p = 0; p < values.length; ++p) {
+    var top = chk >> 25;
+    chk = (chk & 0x1ffffff) << 5 ^ values[p];
+    for (var i = 0; i < 5; ++i) {
+      if ((top >> i) & 1) {
+        chk ^= GENERATOR[i];
+      }
+    }
+  }
+  return chk;
+}
+
+function hrpExpand (hrp) {
+  var ret = [];
+  var p;
+  for (p = 0; p < hrp.length; ++p) {
+    ret.push(hrp.charCodeAt(p) >> 5);
+  }
+  ret.push(0);
+  for (p = 0; p < hrp.length; ++p) {
+    ret.push(hrp.charCodeAt(p) & 31);
+  }
+  return ret;
+}
+
+function verifyChecksum (hrp, data) {
+  return polymod(hrpExpand(hrp).concat(data)) === 1;
+}
+
+function createChecksum (hrp, data) {
+  var values = hrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
+  var mod = polymod(values) ^ 1;
+  var ret = [];
+  for (var p = 0; p < 6; ++p) {
+    ret.push((mod >> 5 * (5 - p)) & 31);
+  }
+  return ret;
+}
+
+function base32(data) {
+  var rts = [];
+  var tmpbits = [];
+  for (var i=data.length-1; i>=0; i--) {
+    var x = data[i];
+    for (var j=0; j<8; j++) {
+      var b = x % 2;
+      tmpbits.push(b);
+      x = (x-b) / 2;
+    }
+  }
+  for (var i=tmpbits.length-1; i>=0; ) {
+    var y = 0;
+    for (var j=0; j<5; j++) {
+      var k = i-j;
+      var x = (k>=0) ? tmpbits[k] : 0;
+      y = 2*y + x;
+    }
+    i = i - 5;
+    if (i>=0 || y>0)
+      rts.push(y);
+  }
+  rts.unshift(0x00);
+  return rts;  
+}
+
+function encode (hrp, data) {
+  var combined = data.concat(createChecksum(hrp, data));
+//alert(data);
+//alert(combined.length);
+  var ret = hrp + '1';
+  for (var p = 0; p < combined.length; ++p) {
+    ret += CHARSET.charAt(combined[p]);
+  }
+  return ret;
+}
+
+function decode (bechString) {
+  var p;
+  var has_lower = false;
+  var has_upper = false;
+  for (p = 0; p < bechString.length; ++p) {
+    if (bechString.charCodeAt(p) < 33 || bechString.charCodeAt(p) > 126) {
+      return null;
+    }
+    if (bechString.charCodeAt(p) >= 97 && bechString.charCodeAt(p) <= 122) {
+        has_lower = true;
+    }
+    if (bechString.charCodeAt(p) >= 65 && bechString.charCodeAt(p) <= 90) {
+        has_upper = true;
+    }
+  }
+  if (has_lower && has_upper) {
+    return null;
+  }
+  bechString = bechString.toLowerCase();
+  var pos = bechString.lastIndexOf('1');
+  if (pos < 1 || pos + 7 > bechString.length || bechString.length > 90) {
+    return null;
+  }
+  var hrp = bechString.substring(0, pos);
+  var data = [];
+  for (p = pos + 1; p < bechString.length; ++p) {
+    var d = CHARSET.indexOf(bechString.charAt(p));
+    if (d === -1) {
+      return null;
+    }
+    data.push(d);
+  }
+  if (!verifyChecksum(hrp, data)) {
+    return null;
+  }
+  return {hrp: hrp, data: data.slice(0, data.length - 6)};
+}
+
+	// Added functions for address format selection
+		function initRadio() {
+			document.getElementById("defaultRadio").checked=true;
+			Bitcoin.Address.addressFormat = 0;
+			Bitcoin.Address.networkVersion = 93;
+		}
+
+		function radioChange(element) {
+			switch (element.value) {
+ 				case "bech32":
+					Bitcoin.Address.addressFormat = 2;
+					Bitcoin.Address.networkVersion = 0;
+					document.getElementById("bulkcompressed").checked=true;
+					document.getElementById("bulkcompressed").disabled=true;
+					document.getElementById("braincompressed").checked=true;
+					document.getElementById("braincompressed").disabled=true;
+					break;
+ 				case "segwit":
+					Bitcoin.Address.addressFormat = 1;
+					Bitcoin.Address.networkVersion = 33;
+					document.getElementById("bulkcompressed").disabled=false;
+					document.getElementById("braincompressed").disabled=false;
+					break;
+				default:
+					Bitcoin.Address.addressFormat = 0;
+					Bitcoin.Address.networkVersion = 93;
+					document.getElementById("bulkcompressed").disabled=false;
+					document.getElementById("braincompressed").disabled=false;
+			}
+		}
+	</script>
+
+
 	<style type="text/css">
 .more { background: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABEAAAARCAYAAAA7bUf6AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEgAACxIB0t1+/AAAABx0RVh0U29mdHdhcmUAQWRvYmUgRmlyZXdvcmtzIENTNXG14zYAAAAWdEVYdENyZWF0aW9uIFRpbWUAMDEvMDIvMTLltnQyAAAB1UlEQVQ4jYWTS04bQRCGv3q0x8gMYJCwknCGLDgLVwiH4grhLFaUXdhkQ0A8pBg/FOLpnmbhMYzxRKlNS1Vdf/31V5XknGnb+eXJCBjzbzu9OLu+azu845Opysej4wHmshF4uJ2TUrb3CV0gIBAKRboC5C2vdkDE9fdty6/xDegvXz+NgDbFUejZ+PjDgExmtpxS9vYwMe5u5iyX8RRoa5Ic+C4qx9KUN1MGu4E618yqJ5axAp44KA7ZL3eYzp/HKdVIw7WK8d6BuDvcod9TQlBEIOXEdPlElSoUJabIIs4Z7h9yNDwgqOMayLXw7epHVIBggrsgspZPUBQyiCgugRQji7TAVDF1XB2TlQoOYCqovkmpopS9fcoiM3ue0rOCYf8IU8NklWxiiOQ3EPXtWagIqo6KYWYEc4IGvMViA6RrnCJKVS9B8ypRHG1YKNa0Ur+C+MPt/I2BKWVZUO4FgvQ47PcptEDF+T2Z8TiZUMWIyGtpd+Bze5VTSqP57O/4YG+AN/RXbSiPkwmL5z/be/L+mM4vT2JKeUW7EXD1erMz/Lo4u77f0K9DDhdA1XG11jh9vWBb99Z9gAg5QZ2hzpmUa0RSW4f/gqSY0s3Vz+tufEjvHS8Tg6BXC7qVbQAAAABJRU5ErkJggg==)
 			no-repeat left center; width: 17px; height: 17px; display: inline-block; float: right; cursor: pointer; }
@@ -6601,7 +6786,7 @@ input[type=checkbox] { position: relative; z-index: 20; }
 
 	</style>
 </head>
-<body onclick="SecureRandom.seedTime();" onmousemove="ninja.seeder.seed(event);">
+<body onclick="SecureRandom.seedTime();" onmousemove="ninja.seeder.seed(event);" onload="initRadio()";>
 	<div id="busyblock"></div>
 	<div id="main">
 		<div id="culturemenu">
@@ -6634,6 +6819,11 @@ input[type=checkbox] { position: relative; z-index: 20; }
 			<li class="hide" id="vanitywallet" onclick="ninja.tab.select(this);">Vanity Wallet
 			<li class="hide" id="splitwallet" onclick="ninja.tab.select(this);">Split Wallet
 		</ul>
+		<span>Address type: 
+			<input type="radio" id="defaultRadio" name="addrFormat" value="legacy" checked="checked" onchange="radioChange(this)"> legacy
+			<input type="radio" name="addrFormat" value="segwit" onchange="radioChange(this)"> p2sh-segwit
+			<input type="radio" name="addrFormat" value="bech32" onchange="radioChange(this)"> bech32
+		</span>
 		
 		<div id="generate">
 			<span id="generatelabelbitcoinaddress">Generating EarthCoin Address...</span><br />
@@ -6693,7 +6883,7 @@ input[type=checkbox] { position: relative; z-index: 20; }
 						<span class="print"><input type="button" name="print" value="Print" id="paperprint" onclick="window.print();" /></span>
 					</div>
 					<div id="paperadvancedcommands" class="row extra">
-						<span><label id="paperlabelencrypt" for="paperencrypt">BIP38 Encrypt?</label> <input type="checkbox" id="paperencrypt" onchange="ninja.wallets.paperwallet.toggleEncrypt(this);" /></span>
+						<span><label id="paperlabelencrypt" for="paperencrypt">BIP38 Encrypt?</label> <input type="checkbox" disabled id="paperencrypt" onchange="ninja.wallets.paperwallet.toggleEncrypt(this);" /></span>
 						<span><label id="paperlabelBIPpassphrase" for="paperpassphrase">Passphrase:</label> <input type="text" id="paperpassphrase" /></span>
 						<span><label id="paperlabeladdressesperpage" for="paperlimitperpage">Addresses per page:</label> <input type="text" id="paperlimitperpage" /></span>
 					</div>
@@ -6711,8 +6901,8 @@ input[type=checkbox] { position: relative; z-index: 20; }
 						<span class="print"><input type="button" name="print" id="bulkprint" value="Print" onclick="window.print();" /></span>
 					</div>
 					<div id="bulkadvancedcommands" class="row extra">
-						<span><label id="bulklabelencrypt" for="bulkencrypt">BIP38 Encrypt?</label> <input type="checkbox" id="bulkencrypt" onchange="ninja.wallets.bulkwallet.toggleEncrypt(this);" /></span>
-						<span><label id="bulklabelBIPpassphrase" for="bulkpassphrase">Passphrase:</label> <input type="text" id="bulkpassphrase" /></span>
+						<span style="visibility: hidden"><label id="bulklabelencrypt" for="bulkencrypt">BIP38 Encrypt?</label> <input type="checkbox"  disabled id="bulkencrypt"  onchange="ninja.wallets.bulkwallet.toggleEncrypt(this);" /></span>
+						<span style="visibility: hidden"><label id="bulklabelBIPpassphrase" for="bulkpassphrase">Passphrase:</label> <input type="text" id="bulkpassphrase" /></span>
 					</div>
 				</div>
 				<div class="body">
@@ -6877,7 +7067,7 @@ input[type=checkbox] { position: relative; z-index: 20; }
 					<span><input type="button" class="button" id="detailview" value="View Details" onclick="ninja.wallets.detailwallet.viewDetails();" /></span>
 					
 					<div id="detailbip38toggle">
-						<span><label id="detaillabelencrypt" for="detailencrypt">BIP38 Encrypt?</label> <input type="checkbox" id="detailbip38checkbox" onchange="ninja.wallets.detailwallet.toggleEncrypt(this);" /></span>
+						<span style="visibility: hidden"><label id="detaillabelencrypt" for="detailencrypt">BIP38 Encrypt?</label> <input type="checkbox" id="detailbip38checkbox"  disabled onchange="ninja.wallets.detailwallet.toggleEncrypt(this);" /></span>
 					</div>
 					<div id="detailbip38commands">
 						<span><label id="detaillabelpassphrase">Enter BIP38 Passphrase</label> <input type="text" id="detailprivkeypassphrase" value="" onfocus="this.select();" onkeypress="if (event.keyCode == 13) ninja.wallets.detailwallet.enterOnPassphrase();" /></span>
@@ -10512,10 +10702,11 @@ ninja.wallets.vanitywallet = {
 				document.getElementById("detailprivhex").innerHTML = btcKey.toString().toUpperCase();
 				document.getElementById("detailprivb64").innerHTML = btcKey.toString("base64");
 				var bitcoinAddress = btcKey.getBitcoinAddress();
+				var showAddr = bitcoinAddress != "";
 				var wif = btcKey.getBitcoinWalletImportFormat();
-				document.getElementById("detailpubkey").innerHTML = btcKey.getPubKeyHex();
-				document.getElementById("detailaddress").innerHTML = bitcoinAddress;
-				document.getElementById("detailprivwif").innerHTML = wif;
+				document.getElementById("detailpubkey").innerHTML = showAddr ? btcKey.getPubKeyHex() : "";
+				document.getElementById("detailaddress").innerHTML = showAddr ? bitcoinAddress : "";
+				document.getElementById("detailprivwif").innerHTML = showAddr ? wif : "";
 				btcKey.setCompressed(true);
 				var bitcoinAddressComp = btcKey.getBitcoinAddress();
 				var wifComp = btcKey.getBitcoinWalletImportFormat();			
@@ -10527,9 +10718,9 @@ ninja.wallets.vanitywallet = {
 				var pool2 = new Bitcoin.ECKey(wifComp); // to satisfy the key pool
 
 				qrCode.showQrCode({
-					"detailqrcodepublic": bitcoinAddress,
+					"detailqrcodepublic": showAddr ? bitcoinAddress : null,
 					"detailqrcodepubliccomp": bitcoinAddressComp,
-					"detailqrcodeprivate": wif,
+					"detailqrcodeprivate": showAddr ? wif : null,
 					"detailqrcodeprivatecomp": wifComp
 				}, 4);
 			}
